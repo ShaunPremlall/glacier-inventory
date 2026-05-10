@@ -20,7 +20,7 @@ export default function LowStockWarning({ data }: Props) {
         </Link>
       </div>
 
-      {data.length === 0 ? (
+      {!data || data.length === 0 ? (
         <p className="text-gray-500 text-sm">All items are sufficiently stocked.</p>
       ) : (
         <div className="space-y-3">

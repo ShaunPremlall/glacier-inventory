@@ -11,7 +11,7 @@ export default function UsageTrend({ data }: Props) {
     <div className="bg-white p-6 rounded-lg shadow-sm border">
       <h2 className="text-lg font-medium text-gray-900 mb-4">Equipment Allocation Trend (30 Days)</h2>
       <div className="h-64 w-full">
-        {data.length === 0 ? (
+        {!data || data.length === 0 ? (
           <div className="flex items-center justify-center h-full text-gray-500">
             No data available for the last 30 days.
           </div>

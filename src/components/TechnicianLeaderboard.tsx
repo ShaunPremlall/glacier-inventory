@@ -8,7 +8,7 @@ export default function TechnicianLeaderboard({ data }: Props) {
   return (
     <div className="bg-white p-6 rounded-lg shadow-sm border">
       <h2 className="text-lg font-medium text-gray-900 mb-4">Top Technicians (Allocations)</h2>
-      {data.length === 0 ? (
+      {!data || data.length === 0 ? (
         <p className="text-gray-500 text-sm">No allocation data available.</p>
       ) : (
         <ul className="divide-y divide-gray-200">

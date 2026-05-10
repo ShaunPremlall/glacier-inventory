@@ -28,7 +28,7 @@ export default function AdminDashboard() {
   }, [])
 
   if (loading) return <div className="p-8 text-center text-gray-500">Loading dashboard...</div>
-  if (!data) return <div className="p-8 text-center text-red-500">Error loading data.</div>
+  if (!data || data.error) return <div className="p-8 text-center text-red-500">Error loading data: {data?.error || 'Unknown error'}</div>
 
   return (
     <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
@@ -62,13 +62,13 @@ export default function AdminDashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Main Chart Area */}
         <div className="lg:col-span-2">
-          <UsageTrend data={data.usageTrend} />
+          <UsageTrend data={data.usageTrend || []} />
         </div>
 
         {/* Side Panel */}
         <div className="space-y-8 lg:col-span-1">
-          <LowStockWarning data={data.lowStock} />
-          <TechnicianLeaderboard data={data.leaderboard} />
+          <LowStockWarning data={data.lowStock || []} />
+          <TechnicianLeaderboard data={data.leaderboard || []} />
         </div>
       </div>
     </div>

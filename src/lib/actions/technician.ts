@@ -1,97 +1,126 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/firebase/server'
+import { getUserSession } from '@/lib/actions/auth'
 
-// Keep existing getTechnicianDashboardData, confirmAllocation, reportAllocationIssue
 export async function getTechnicianDashboardData() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { error: 'Not authenticated' }
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
 
-  const { data: pending, error: pendingError } = await supabase
-    .from('allocations')
-    .select('*, stock_item:stock_items(*), allocation_serials(serial_number:serial_numbers(*))')
-    .eq('technician_id', user.id)
-    .eq('status', 'pending_confirmation')
-    .order('created_at', { ascending: false })
+  try {
+    const allocationsSnapshot = await db.collection('allocations')
+      .where('technician_id', '==', session.uid)
+      .get()
 
-  const { data: held, error: heldError } = await supabase
-    .from('allocations')
-    .select('*, stock_item:stock_items(*), allocation_serials(serial_number:serial_numbers(*))')
-    .eq('technician_id', user.id)
-    .in('status', ['confirmed', 'return_pending'])
-    .order('created_at', { ascending: false })
+    const allocations = await Promise.all(allocationsSnapshot.docs.map(async (doc) => {
+      const data = doc.data()
 
-  if (pendingError || heldError) {
-    return { error: pendingError?.message || heldError?.message }
-  }
+      // Fetch stock item details
+      const stockDoc = await db.collection('stock_items').doc(data.stock_item_id).get()
+      const stock_item = { id: stockDoc.id, ...stockDoc.data() }
 
-  return {
-    pending: pending || [],
-    held: held || []
+      // Fetch serials if any
+      const serialsData: any[] = []
+      if (data.serial_number_ids && data.serial_number_ids.length > 0) {
+        // Handle chunking if > 30 serials
+        const chunks = []
+        for (let i = 0; i < data.serial_number_ids.length; i += 30) {
+            chunks.push(data.serial_number_ids.slice(i, i + 30))
+        }
+
+        for (const chunk of chunks) {
+            // FieldPath.documentId() allows querying by doc id
+            const serialsSnap = await db.collection('serial_numbers')
+              .where('__name__', 'in', chunk)
+              .get()
+            serialsSnap.forEach(sDoc => {
+               serialsData.push({
+                 serial_number: { id: sDoc.id, ...sDoc.data() } // Formatting to match UI expectations
+               })
+            })
+        }
+      }
+
+      return {
+        id: doc.id,
+        ...data,
+        stock_item,
+        allocation_serials: serialsData
+      }
+    }))
+
+    const pending = allocations
+      .filter((a: any) => a.status === 'pending_confirmation')
+      .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+
+    const held = allocations
+      .filter((a: any) => a.status === 'confirmed' || a.status === 'return_pending')
+      .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+
+    return { pending, held }
+  } catch (error: any) {
+    return { error: error.message }
   }
 }
 
 export async function confirmAllocation(allocationId: string) {
-  const supabase = await createClient()
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
 
-  const { error } = await supabase
-    .from('allocations')
-    .update({ status: 'confirmed' })
-    .eq('id', allocationId)
-
-  if (error) return { error: error.message }
-
-  revalidatePath('/technician/dashboard')
-  return { success: true }
+  try {
+    await db.collection('allocations').doc(allocationId).update({
+      status: 'confirmed',
+      updated_at: new Date().toISOString()
+    })
+    revalidatePath('/technician/dashboard')
+    return { success: true }
+  } catch (error: any) {
+    return { error: error.message }
+  }
 }
 
 export async function reportAllocationIssue(allocationId: string, issueDetails: string) {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { error: 'Not authenticated' }
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
 
-  await supabase.from('audit_logs').insert({
-    action: 'ALLOCATION_ISSUE_REPORTED',
-    user_id: user.id,
-    details: {
-      allocation_id: allocationId,
-      issue: issueDetails
-    }
-  })
+  try {
+    await db.collection('audit_logs').add({
+      action: 'ALLOCATION_ISSUE_REPORTED',
+      user_id: session.uid,
+      details: {
+        allocation_id: allocationId,
+        issue: issueDetails
+      },
+      created_at: new Date().toISOString()
+    })
 
-  revalidatePath('/technician/dashboard')
-  return { success: true }
+    revalidatePath('/technician/dashboard')
+    return { success: true }
+  } catch (error: any) {
+    return { error: error.message }
+  }
 }
 
 export async function initiateReturn(allocationId: string, returnData: { reason: string; quantity: number; serial_ids?: string[] }) {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { error: 'Not authenticated' }
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
 
-  // 1. Create a return record or update the allocation
-  // Since we don't have a dedicated `returns` table in schema.sql,
-  // we will handle this by creating an audit log and updating allocation status.
-  // In a real app, a `returns` table is better. Let's use `allocations` status 'returned' but it's an admin action.
-  // Let's create an audit log to notify admins, and perhaps change allocation status to 'return_pending'
-  // Wait, 'return_pending' is not in our AllocationStatus type constraint: 'pending_confirmation', 'confirmed', 'returned'
-  // So we will just leave it 'confirmed' but log the intent, or if it's the full amount, maybe just log it.
+  try {
+    await db.collection('audit_logs').add({
+      action: 'RETURN_INITIATED',
+      user_id: session.uid,
+      details: {
+        allocation_id: allocationId,
+        ...returnData
+      },
+      created_at: new Date().toISOString()
+    })
 
-  // For simplicity and since we must use the existing schema, we will record the return request in `audit_logs`
-  await supabase.from('audit_logs').insert({
-    action: 'RETURN_INITIATED',
-    user_id: user.id,
-    details: {
-      allocation_id: allocationId,
-      ...returnData
-    }
-  })
-
-  // Optionally, if we had a status 'return_pending', we'd update it.
-  // For now, let's just use the audit log to populate the Admin Returns view.
-
-  revalidatePath('/technician/dashboard')
-  revalidatePath('/admin/returns')
-  return { success: true }
+    revalidatePath('/technician/dashboard')
+    revalidatePath('/admin/returns')
+    return { success: true }
+  } catch (error: any) {
+    return { error: error.message }
+  }
 }

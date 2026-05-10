@@ -1,76 +1,88 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/firebase/server'
+import { getUserSession } from '@/lib/actions/auth'
 
 export async function getDashboardData() {
-  const supabase = await createClient()
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
+  const profileDoc = await db.collection('profiles').doc(session.uid).get()
+  if (profileDoc.data()?.role !== 'Admin') return { error: 'Unauthorized' }
 
-  // 1. Low Stock Items
-  const { data: lowStock } = await supabase
-    .from('stock_items')
-    .select('id, name, quantity, category')
-    // Define a threshold, e.g., 5
-    .lte('quantity', 5)
-    .order('quantity', { ascending: true })
-    .limit(5)
+  try {
+    // 1. Low Stock Items
+    const stockSnap = await db.collection('stock_items')
+      .where('quantity', '<=', 5)
+      .orderBy('quantity', 'asc')
+      .limit(5)
+      .get()
 
-  // 2. Usage Trend (Last 30 days)
-  const thirtyDaysAgo = new Date()
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+    const lowStock = stockSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }))
 
-  const { data: auditLogs } = await supabase
-    .from('audit_logs')
-    .select('created_at, details')
-    .eq('action', 'EQUIPMENT_ALLOCATED')
-    .gte('created_at', thirtyDaysAgo.toISOString())
+    // 2. Usage Trend (Last 30 days)
+    const thirtyDaysAgo = new Date()
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
 
-  // Aggregate by date
-  const trendMap: Record<string, number> = {}
+    const auditLogsSnap = await db.collection('audit_logs')
+      .where('action', '==', 'EQUIPMENT_ALLOCATED')
+      .where('created_at', '>=', thirtyDaysAgo.toISOString())
+      .get()
 
-  // Initialize last 30 days with 0
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date()
-    d.setDate(d.getDate() - i)
-    const dateStr = d.toISOString().split('T')[0]
-    trendMap[dateStr] = 0
-  }
+    // Aggregate by date
+    const trendMap: Record<string, number> = {}
 
-  auditLogs?.forEach(log => {
-    const dateStr = log.created_at.split('T')[0]
-    if (trendMap[dateStr] !== undefined) {
-      trendMap[dateStr] += (log.details.quantity || 0)
+    // Initialize last 30 days with 0
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date()
+      d.setDate(d.getDate() - i)
+      const dateStr = d.toISOString().split('T')[0]
+      trendMap[dateStr] = 0
     }
-  })
 
-  const usageTrend = Object.keys(trendMap).map(date => ({
-    date: date.substring(5), // MM-DD
-    allocations: trendMap[date]
-  }))
+    auditLogsSnap.forEach(doc => {
+      const data = doc.data()
+      const dateStr = data.created_at.split('T')[0]
+      if (trendMap[dateStr] !== undefined) {
+        trendMap[dateStr] += (data.details.quantity || 0)
+      }
+    })
 
-  // 3. Technician Leaderboard
-  const { data: allocations } = await supabase
-    .from('allocations')
-    .select('technician_id, profiles(email), quantity')
+    const usageTrend = Object.keys(trendMap).map(date => ({
+      date: date.substring(5), // MM-DD
+      allocations: trendMap[date]
+    }))
 
-  const leaderMap: Record<string, { email: string, count: number }> = {}
+    // 3. Technician Leaderboard
+    const allocationsSnap = await db.collection('allocations').get()
+    const leaderMap: Record<string, { email: string, count: number }> = {}
 
-  allocations?.forEach(alloc => {
-    // Handling possible array return from Supabase join
-    const profileData = Array.isArray(alloc.profiles) ? alloc.profiles[0] : alloc.profiles
-    const email = profileData?.email || 'Unknown'
-    if (!leaderMap[alloc.technician_id]) {
-      leaderMap[alloc.technician_id] = { email, count: 0 }
+    // Fetch all profiles to map technician IDs to emails
+    const profilesSnap = await db.collection('profiles').get()
+    const profilesMap: Record<string, string> = {}
+    profilesSnap.forEach(doc => {
+      profilesMap[doc.id] = doc.data().email || 'Unknown'
+    })
+
+    allocationsSnap.forEach(doc => {
+      const data = doc.data()
+      const email = profilesMap[data.technician_id] || 'Unknown'
+
+      if (!leaderMap[data.technician_id]) {
+        leaderMap[data.technician_id] = { email, count: 0 }
+      }
+      leaderMap[data.technician_id].count += data.quantity
+    })
+
+    const leaderboard = Object.values(leaderMap)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5)
+
+    return {
+      lowStock,
+      usageTrend,
+      leaderboard
     }
-    leaderMap[alloc.technician_id].count += alloc.quantity
-  })
-
-  const leaderboard = Object.values(leaderMap)
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 5)
-
-  return {
-    lowStock: lowStock || [],
-    usageTrend,
-    leaderboard
+  } catch (error: any) {
+    return { error: error.message }
   }
 }

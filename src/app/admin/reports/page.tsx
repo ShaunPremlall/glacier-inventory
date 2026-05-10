@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { getMonthlyUsageData } from '@/lib/actions/reports'
+import { generateInventoryInsights } from '@/lib/actions/ai'
 import * as XLSX from 'xlsx'
 import { jsPDF } from 'jspdf'
 import 'jspdf-autotable'
@@ -10,6 +11,8 @@ import 'jspdf-autotable'
 export default function ReportsPage() {
   const [loading, setLoading] = useState(false)
   const [reportData, setReportData] = useState<any>(null)
+  const [aiInsight, setAiInsight] = useState<string | null>(null)
+  const [generatingInsight, setGeneratingInsight] = useState(false)
 
   const currentDate = new Date()
   const [selectedMonth, setSelectedMonth] = useState(currentDate.getMonth() + 1)
@@ -17,6 +20,7 @@ export default function ReportsPage() {
 
   async function handleGenerateReport() {
     setLoading(true)
+    setAiInsight(null)
     const result = await getMonthlyUsageData(selectedYear, selectedMonth)
 
     if (result.error) {
@@ -26,6 +30,19 @@ export default function ReportsPage() {
       toast.success('Report data generated')
     }
     setLoading(false)
+  }
+
+  async function handleGenerateInsight() {
+    if (!reportData) return
+    setGeneratingInsight(true)
+    const result = await generateInventoryInsights(selectedYear, selectedMonth)
+    if (result.error) {
+       toast.error(result.error)
+    } else if (result.insight) {
+       setAiInsight(result.insight)
+       toast.success('AI insights generated')
+    }
+    setGeneratingInsight(false)
   }
 
   function exportToExcel() {
@@ -148,6 +165,24 @@ export default function ReportsPage() {
               <p className="text-sm font-medium text-gray-500">Total Stock on Hand</p>
               <p className="mt-2 text-3xl font-semibold text-gray-900">{reportData.totalStockOnHand}</p>
             </div>
+          </div>
+
+          <div className="mb-8 border border-indigo-100 bg-indigo-50 rounded-lg p-6">
+            <div className="flex justify-between items-center mb-4">
+               <h3 className="text-md font-medium text-indigo-900">Google AI Studio Insights</h3>
+               <button
+                 onClick={handleGenerateInsight}
+                 disabled={generatingInsight}
+                 className="bg-indigo-600 text-white px-3 py-1.5 rounded text-sm hover:bg-indigo-700 disabled:opacity-50"
+               >
+                 {generatingInsight ? 'Analyzing...' : 'Generate AI Insights'}
+               </button>
+            </div>
+            {aiInsight ? (
+              <p className="text-sm text-indigo-800 leading-relaxed whitespace-pre-wrap">{aiInsight}</p>
+            ) : (
+              <p className="text-sm text-indigo-400 italic">Click the button to analyze this month's data using Gemini.</p>
+            )}
           </div>
 
           <div>

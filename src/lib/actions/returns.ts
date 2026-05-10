@@ -1,119 +1,122 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/firebase/server'
+import { getUserSession } from '@/lib/actions/auth'
 
 export async function getPendingReturns() {
-  const supabase = await createClient()
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
+  const profileDoc = await db.collection('profiles').doc(session.uid).get()
+  if (profileDoc.data()?.role !== 'Admin') return { error: 'Unauthorized' }
 
-  // We are using audit_logs where action = 'RETURN_INITIATED' to find pending returns
-  // In a real system, we'd have a returns table. Let's fetch these logs.
-  // We need to fetch the allocation details for context.
+  try {
+    const logsSnapshot = await db.collection('audit_logs')
+      .where('action', '==', 'RETURN_INITIATED')
+      .orderBy('created_at', 'desc')
+      .get()
 
-  const { data: logs, error } = await supabase
-    .from('audit_logs')
-    .select('id, user_id, details, created_at, profiles(email)')
-    .eq('action', 'RETURN_INITIATED')
-    .order('created_at', { ascending: false })
+    const acceptedLogsSnapshot = await db.collection('audit_logs')
+      .where('action', '==', 'RETURN_ACCEPTED')
+      .get()
 
-  if (error) return { error: error.message }
+    const acceptedReturnLogIds = acceptedLogsSnapshot.docs.map(doc => doc.data().details.original_log_id)
 
-  // For each log, fetch the allocation context if needed.
-  // But wait, if an admin processes a return, we need to mark it as processed so it doesn't show up again.
-  // Since we are using audit_logs, there's no "status" field on the log.
-  // We can add a new audit_log 'RETURN_ACCEPTED' and filter out initiated returns that have a corresponding accepted log.
+    const pendingReturns: any[] = []
 
-  const { data: acceptedLogs } = await supabase
-    .from('audit_logs')
-    .select('details')
-    .eq('action', 'RETURN_ACCEPTED')
+    for (const doc of logsSnapshot.docs) {
+      if (!acceptedReturnLogIds.includes(doc.id)) {
+        const data = doc.data()
+        // Fetch user profile for email
+        let email = 'Unknown User'
+        if (data.user_id) {
+           const profileDoc = await db.collection('profiles').doc(data.user_id).get()
+           if (profileDoc.exists) email = profileDoc.data()?.email || email
+        }
 
-  const acceptedReturnLogIds = acceptedLogs?.map(log => log.details.original_log_id) || []
+        pendingReturns.push({
+          id: doc.id,
+          user_id: data.user_id,
+          profiles: { email },
+          details: data.details,
+          created_at: data.created_at
+        })
+      }
+    }
 
-  const pendingReturns = logs.filter(log => !acceptedReturnLogIds.includes(log.id))
-
-  return { returns: pendingReturns }
+    return { returns: pendingReturns }
+  } catch (error: any) {
+    return { error: error.message }
+  }
 }
 
 export async function acceptReturn(returnLogId: string, details: any) {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { error: 'Not authenticated' }
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
+  const profileDoc = await db.collection('profiles').doc(session.uid).get()
+  if (profileDoc.data()?.role !== 'Admin') return { error: 'Unauthorized' }
 
-  // Extract necessary details
   const { allocation_id, reason, quantity, serial_ids } = details
 
-  // 1. Fetch the original allocation
-  const { data: allocation, error: allocError } = await supabase
-    .from('allocations')
-    .select('*')
-    .eq('id', allocation_id)
-    .single()
+  try {
+    await db.runTransaction(async (t) => {
+      // 1. Fetch the original allocation
+      const allocationRef = db.collection('allocations').doc(allocation_id)
+      const allocationDoc = await t.get(allocationRef)
 
-  if (allocError) return { error: allocError.message }
+      if (!allocationDoc.exists) throw new Error('Allocation not found')
+      const allocation = allocationDoc.data()!
 
-  // 2. Logic based on reason
-  if (reason === 'Unused') {
-    // Add back to warehouse
-    const { data: currentStock } = await supabase
-      .from('stock_items')
-      .select('quantity')
-      .eq('id', allocation.stock_item_id)
-      .single()
+      // 2. Logic based on reason
+      if (reason === 'Unused') {
+        const stockRef = db.collection('stock_items').doc(allocation.stock_item_id)
+        const stockDoc = await t.get(stockRef)
+        if (stockDoc.exists) {
+          t.update(stockRef, { quantity: stockDoc.data()!.quantity + quantity })
+        }
 
-    await supabase
-      .from('stock_items')
-      .update({ quantity: currentStock!.quantity + quantity })
-      .eq('id', allocation.stock_item_id)
+        if (serial_ids && serial_ids.length > 0) {
+          serial_ids.forEach((id: string) => {
+            t.update(db.collection('serial_numbers').doc(id), { status: 'warehouse' })
+          })
+        }
+      } else if (reason === 'Damaged' || reason === 'Faulty') {
+        if (serial_ids && serial_ids.length > 0) {
+          serial_ids.forEach((id: string) => {
+            t.update(db.collection('serial_numbers').doc(id), {
+              status: reason === 'Damaged' ? 'quarantine' : 'faulty'
+            })
+          })
+        }
+      }
 
-    if (serial_ids && serial_ids.length > 0) {
-      await supabase
-        .from('serial_numbers')
-        .update({ status: 'warehouse' })
-        .in('id', serial_ids)
-    }
-  } else if (reason === 'Damaged' || reason === 'Faulty') {
-    // Quarantine/Repair status, do NOT add quantity back to available stock
-    if (serial_ids && serial_ids.length > 0) {
-      await supabase
-        .from('serial_numbers')
-        .update({ status: reason === 'Damaged' ? 'quarantine' : 'faulty' })
-        .in('id', serial_ids)
-    }
-    // If it's not serialized, we'd ideally have a separate tracking for damaged generic items,
-    // but for now, we just don't add it back to available `quantity`.
+      // 3. Update allocation status
+      if (quantity === allocation.quantity) {
+         t.update(allocationRef, { status: 'returned' })
+      } else {
+         t.update(allocationRef, { quantity: allocation.quantity - quantity })
+      }
+
+      // 4. Log the acceptance
+      const auditRef = db.collection('audit_logs').doc()
+      t.set(auditRef, {
+        action: 'RETURN_ACCEPTED',
+        user_id: session.uid,
+        details: {
+          original_log_id: returnLogId,
+          allocation_id,
+          reason,
+          quantity_returned: quantity,
+          serial_ids
+        },
+        created_at: new Date().toISOString()
+      })
+    })
+
+    revalidatePath('/admin/returns')
+    revalidatePath('/admin/stock')
+    return { success: true }
+  } catch (error: any) {
+    return { error: error.message }
   }
-
-  // 3. Update allocation status
-  // If returning partial quantity, this logic is more complex. For now, we assume returning the whole allocation or marking the allocation as returned.
-  // A better approach is to reduce allocation quantity, but let's just mark it 'returned' for simplicity if the whole qty is returned.
-  if (quantity === allocation.quantity) {
-     await supabase
-       .from('allocations')
-       .update({ status: 'returned' })
-       .eq('id', allocation_id)
-  } else {
-     // Partial return. Subtract quantity from allocation.
-     await supabase
-       .from('allocations')
-       .update({ quantity: allocation.quantity - quantity })
-       .eq('id', allocation_id)
-  }
-
-  // 4. Log the acceptance
-  await supabase.from('audit_logs').insert({
-    action: 'RETURN_ACCEPTED',
-    user_id: user.id,
-    details: {
-      original_log_id: returnLogId,
-      allocation_id,
-      reason,
-      quantity_returned: quantity,
-      serial_ids
-    }
-  })
-
-  revalidatePath('/admin/returns')
-  revalidatePath('/admin/stock')
-  return { success: true }
 }

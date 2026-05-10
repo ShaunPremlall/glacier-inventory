@@ -1,63 +1,46 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
-import { Role, UserStatus } from '@/types'
+import { db } from '@/lib/firebase/server'
+import { Role, UserStatus, Profile } from '@/types'
+import { getUserSession } from '@/lib/actions/auth'
 
 export async function getUsers() {
-  const supabase = await createClient()
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
 
-  // First verify the current user is an admin
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { error: 'Not authenticated' }
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('role')
-    .eq('id', user.id)
-    .single()
+  const profileRef = await db.collection('profiles').doc(session.uid).get()
+  const profile = profileRef.data() as Profile | undefined
 
   if (profile?.role !== 'Admin') {
     return { error: 'Unauthorized' }
   }
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('*')
-    .order('created_at', { ascending: false })
-
-  if (error) {
+  try {
+    const snapshot = await db.collection('profiles').orderBy('created_at', 'desc').get()
+    const users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Profile))
+    return { users }
+  } catch (error: any) {
     return { error: error.message }
   }
-
-  return { users: data }
 }
 
 export async function updateUser(userId: string, updates: { role?: Role; status?: UserStatus }) {
-  const supabase = await createClient()
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
 
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { error: 'Not authenticated' }
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('role')
-    .eq('id', user.id)
-    .single()
+  const profileRef = await db.collection('profiles').doc(session.uid).get()
+  const profile = profileRef.data() as Profile | undefined
 
   if (profile?.role !== 'Admin') {
     return { error: 'Unauthorized' }
   }
 
-  const { error } = await supabase
-    .from('profiles')
-    .update(updates)
-    .eq('id', userId)
-
-  if (error) {
+  try {
+    await db.collection('profiles').doc(userId).update(updates)
+    revalidatePath('/admin/users')
+    return { success: true }
+  } catch (error: any) {
     return { error: error.message }
   }
-
-  revalidatePath('/admin/users')
-  return { success: true }
 }

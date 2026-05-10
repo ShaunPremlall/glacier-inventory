@@ -4,15 +4,15 @@ export type SerialStatus = 'warehouse' | 'allocated' | 'quarantine' | 'faulty';
 export type AllocationStatus = 'pending_confirmation' | 'confirmed' | 'returned';
 
 export interface Profile {
-  id: string;
+  id: string; // Document ID (usually matches Firebase Auth UID)
   email: string;
   role: Role;
   status: UserStatus;
-  created_at: string;
+  created_at: string; // ISO String
 }
 
 export interface StockItem {
-  id: string;
+  id: string; // Document ID
   name: string;
   category: string;
   description: string | null;
@@ -24,44 +24,38 @@ export interface StockItem {
 }
 
 export interface SerialNumber {
-  id: string;
-  stock_item_id: string;
+  id: string; // Document ID
+  stock_item_id: string; // Reference to StockItem Document ID
   serial_number: string;
   status: SerialStatus;
   created_at: string;
   updated_at: string;
 }
 
+// In Firestore, we can embed serials or keep them separate.
+// Keeping them separate (as above) makes large queries easier.
+// For allocations, we can embed the list of serial_ids rather than a join table.
 export interface Allocation {
-  id: string;
+  id: string; // Document ID
   admin_id: string | null;
-  technician_id: string;
-  stock_item_id: string;
+  technician_id: string; // Reference to Profile Document ID
+  stock_item_id: string; // Reference to StockItem Document ID
   quantity: number;
+  serial_number_ids?: string[]; // Embedded array of serial number Document IDs
   status: AllocationStatus;
   created_at: string;
   updated_at: string;
 
-  // Relations for joining
+  // Optional transient fields for UI joins
   technician?: Profile;
   stock_item?: StockItem;
-  allocation_serials?: AllocationSerial[];
-}
-
-export interface AllocationSerial {
-  id: string;
-  allocation_id: string;
-  serial_number_id: string;
-  created_at: string;
-
-  // Relation
-  serial_number?: SerialNumber;
+  serial_numbers_data?: SerialNumber[];
 }
 
 export interface AuditLog {
-  id: string;
+  id: string; // Document ID
   action: string;
-  user_id: string;
+  user_id: string; // Reference to Profile Document ID
   details: any;
   created_at: string;
 }

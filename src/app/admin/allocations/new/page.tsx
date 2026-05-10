@@ -45,7 +45,7 @@ export default function NewAllocationPage() {
       else setStockItems(stockRes.stockItems || [])
 
       if (techRes.error) toast.error(techRes.error)
-      else setTechnicians(techRes.technicians || [])
+      else setTechnicians(techRes.technicians as Technician[] || [])
 
       setLoading(false)
     }

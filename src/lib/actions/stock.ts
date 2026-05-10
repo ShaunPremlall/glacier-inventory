@@ -1,13 +1,14 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
+import { db, adminStorage } from '@/lib/firebase/server'
+import { getUserSession } from '@/lib/actions/auth'
 
 export async function addStockItem(formData: FormData) {
-  const supabase = await createClient()
-
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { error: 'Not authenticated' }
+  const session = await getUserSession()
+  if (!session) return { error: 'Not authenticated' }
+  const profileDoc = await db.collection('profiles').doc(session.uid).get()
+  if (profileDoc.data()?.role !== 'Admin') return { error: 'Unauthorized' }
 
   // 1. Extract and validate data
   const name = formData.get('name') as string
@@ -29,92 +30,106 @@ export async function addStockItem(formData: FormData) {
   }
 
   // 2. Handle image upload if exists
-  let image_url = null
+  let image_url: string | null = null
   const image = formData.get('image') as File | null
+
   if (image && image.size > 0) {
     const fileExt = image.name.split('.').pop()
-    const fileName = `${Math.random()}.${fileExt}`
+    const fileName = `${Math.random().toString(36).substring(2, 15)}.${fileExt}`
     const filePath = `stock-images/${fileName}`
 
-    const { error: uploadError } = await supabase.storage
-      .from('inventory')
-      .upload(filePath, image)
+    try {
+      const bucket = adminStorage.bucket()
+      const file = bucket.file(filePath)
 
-    if (uploadError) {
+      const buffer = Buffer.from(await image.arrayBuffer())
+      await file.save(buffer, {
+        metadata: { contentType: image.type }
+      })
+
+      await file.makePublic()
+      image_url = `https://storage.googleapis.com/${bucket.name}/${file.name}`
+    } catch (uploadError: any) {
       return { error: `Failed to upload image: ${uploadError.message}` }
     }
-
-    const { data: { publicUrl } } = supabase.storage
-      .from('inventory')
-      .getPublicUrl(filePath)
-
-    image_url = publicUrl
   }
 
-  // 3. Batch check for serialized items
-  if (is_serialized && serialNumbers.length > 0) {
-    const { data: existingSerials, error: checkError } = await supabase
-      .from('serial_numbers')
-      .select('serial_number')
-      .in('serial_number', serialNumbers)
+  try {
+    // 3. Batch check for serialized items (Firestore doesn't have an 'IN' query over 10 items easily,
+    // but we can query them or do batched reads. For simplicity here, we assume a reasonable batch size).
+    if (is_serialized && serialNumbers.length > 0) {
+      const serialsRef = db.collection('serial_numbers')
 
-    if (checkError) return { error: checkError.message }
+      // Basic approach: query all and find overlaps, or chunk the query
+      // Firestore IN limit is 30. If > 30, we'd need to chunk.
+      const chunks = []
+      for (let i = 0; i < serialNumbers.length; i += 30) {
+          chunks.push(serialNumbers.slice(i, i + 30))
+      }
 
-    if (existingSerials && existingSerials.length > 0) {
-      const conflicts = existingSerials.map(s => s.serial_number).join(', ')
-      return { error: `Serial numbers already exist in database: ${conflicts}` }
+      const conflicts: string[] = []
+      for (const chunk of chunks) {
+         const snapshot = await serialsRef.where('serial_number', 'in', chunk).get()
+         if (!snapshot.empty) {
+             snapshot.forEach(doc => conflicts.push(doc.data().serial_number))
+         }
+      }
+
+      if (conflicts.length > 0) {
+        return { error: `Serial numbers already exist in database: ${conflicts.join(', ')}` }
+      }
     }
-  }
 
-  // 4. Insert into stock_items
-  const { data: stockItem, error: stockError } = await supabase
-    .from('stock_items')
-    .insert({
+    const batch = db.batch()
+
+    // 4. Insert into stock_items
+    const stockItemRef = db.collection('stock_items').doc()
+    batch.set(stockItemRef, {
       name,
       category,
       description,
       is_serialized,
       quantity,
-      image_url
+      image_url,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     })
-    .select()
-    .single()
 
-  if (stockError) return { error: stockError.message }
-
-  // 5. Insert serial numbers if serialized
-  if (is_serialized && serialNumbers.length > 0) {
-    const serialsToInsert = serialNumbers.map(sn => ({
-      stock_item_id: stockItem.id,
-      serial_number: sn,
-      status: 'warehouse'
-    }))
-
-    const { error: serialError } = await supabase
-      .from('serial_numbers')
-      .insert(serialsToInsert)
-
-    if (serialError) {
-      // Rollback stock item if serials fail
-      await supabase.from('stock_items').delete().eq('id', stockItem.id)
-      return { error: serialError.message }
+    // 5. Insert serial numbers if serialized
+    if (is_serialized && serialNumbers.length > 0) {
+      serialNumbers.forEach(sn => {
+        const serialRef = db.collection('serial_numbers').doc()
+        batch.set(serialRef, {
+          stock_item_id: stockItemRef.id,
+          serial_number: sn,
+          status: 'warehouse',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+      })
     }
+
+    // 6. Create audit log
+    const auditRef = db.collection('audit_logs').doc()
+    batch.set(auditRef, {
+      action: 'STOCK_INTAKE',
+      user_id: session.uid,
+      details: {
+        items: quantity,
+        category: category,
+        stock_item_id: stockItemRef.id,
+        is_serialized
+      },
+      created_at: new Date().toISOString()
+    })
+
+    await batch.commit()
+
+    revalidatePath('/admin/dashboard')
+    revalidatePath('/admin/stock')
+
+    return { success: true }
+  } catch (error: any) {
+     return { error: error.message }
   }
-
-  // 6. Create audit log
-  await supabase.from('audit_logs').insert({
-    action: 'STOCK_INTAKE',
-    user_id: user.id,
-    details: {
-      items: quantity,
-      category: category,
-      stock_item_id: stockItem.id,
-      is_serialized
-    }
-  })
-
-  revalidatePath('/admin/dashboard')
-  revalidatePath('/admin/stock')
-
-  return { success: true }
 }

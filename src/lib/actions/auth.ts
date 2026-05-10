@@ -36,10 +36,22 @@ export async function login(formData: FormData) {
 
     // Fetch profile to check active status before creating session
     const profileRef = await db.collection('profiles').doc(userCredential.user.uid).get()
-    const profile = profileRef.data()
+    let profile = profileRef.data()
 
     if (!profile) {
-      return { error: 'Profile not found.' }
+      // Auto-provision the specified Admin user if they don't have a profile yet
+      if (email.toLowerCase() === 'merryl@alcinvest.co.za') {
+        const newProfile = {
+          email: email,
+          role: 'Admin',
+          status: 'active',
+          created_at: new Date().toISOString()
+        }
+        await db.collection('profiles').doc(userCredential.user.uid).set(newProfile)
+        profile = newProfile
+      } else {
+        return { error: 'Profile not found. Please sign up first.' }
+      }
     }
 
     if (profile.status !== 'active') {
@@ -58,7 +70,13 @@ export async function login(formData: FormData) {
   }
 
   revalidatePath('/', 'layout')
-  redirect('/technician/dashboard') // Redirecting to safe route, layout will redirect admin if needed
+
+  // Redirect based on role to avoid unnecessary middleware/layout bouncing
+  if (email.toLowerCase() === 'merryl@alcinvest.co.za') {
+    redirect('/admin/dashboard')
+  } else {
+    redirect('/technician/dashboard')
+  }
 }
 
 export async function signup(formData: FormData) {

@@ -49,9 +49,11 @@ export default function AddStockPage() {
       if (data.is_serialized) {
          formData.append('serial_numbers', JSON.stringify(data.serial_numbers?.map(s => s.value)))
       } else {
-         formData.append('quantity', String(data.quantity))
+         // quantity is a number, we must safely stringify it
+         formData.append('quantity', String(data.quantity || 1))
       }
 
+      // Check if image exists and has length (it is a FileList on the client)
       if (data.image && data.image.length > 0) {
         formData.append('image', data.image[0])
       }

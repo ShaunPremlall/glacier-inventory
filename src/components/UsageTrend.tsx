@@ -3,7 +3,7 @@
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 
 type Props = {
-  data: { date: string, allocations: number }[]
+  data: { date: string, allocations: number }[] | undefined | null
 }
 
 export default function UsageTrend({ data }: Props) {

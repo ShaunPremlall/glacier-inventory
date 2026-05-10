@@ -1,7 +1,7 @@
 'use client'
 
 type Props = {
-  data: { email: string, count: number }[]
+  data: { email: string, count: number }[] | undefined | null
 }
 
 export default function TechnicianLeaderboard({ data }: Props) {

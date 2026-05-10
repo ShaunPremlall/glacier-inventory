@@ -4,7 +4,7 @@ import { AlertTriangle } from 'lucide-react'
 import Link from 'next/link'
 
 type Props = {
-  data: { id: string, name: string, quantity: number, category: string }[]
+  data: { id: string, name: string, quantity: number, category: string }[] | undefined | null
 }
 
 export default function LowStockWarning({ data }: Props) {

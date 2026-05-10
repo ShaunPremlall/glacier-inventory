@@ -54,7 +54,7 @@ export default function AddStockPage() {
       }
 
       // Check if image exists and has length (it is a FileList on the client)
-      if (data.image && data.image.length > 0) {
+      if (data.image && data.image.length > 0 && data.image[0] instanceof File) {
         formData.append('image', data.image[0])
       }
 
